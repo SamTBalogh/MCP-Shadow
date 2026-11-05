@@ -1,6 +1,6 @@
 # MCP Shadow
 
-**Experimental portfolio project for a Docker homelab. Not production-ready.**
+**Experimental project for a Docker homelab. Not production-ready.**
 
 MCP Shadow is a read-only [Model Context Protocol](https://modelcontextprotocol.io/)
 server. It gives an MCP client or agent tools to discover labelled Docker services,
