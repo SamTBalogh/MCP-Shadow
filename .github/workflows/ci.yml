@@ -16,7 +16,8 @@ jobs:
         with:
           python-version: '3.14'
       - name: Install dependencies
-        run: python -m pip install --require-hashes --only-binary=:all: -r requirements-hashed.txt
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r requirements-hashed.txt
       - name: Check dependencies
         run: python -m pip check
       - name: Check server imports
