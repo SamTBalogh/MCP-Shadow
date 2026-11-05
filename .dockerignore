@@ -1,0 +1,12 @@
+# Allow build metadata, runtime sources and locked dependencies.
+**
+!Dockerfile
+!.dockerignore
+!requirements-hashed.txt
+!server.py
+!formatting.py
+!shadow/
+# Re-including a directory also admits its descendants unless excluded again.
+*/*
+!shadow/*.py
+shadow/*/*

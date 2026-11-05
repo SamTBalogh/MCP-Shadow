@@ -1,0 +1,104 @@
+services:
+  docker-proxy:
+    image: ghcr.io/tecnativa/docker-socket-proxy@sha256:753044cb0851ce53ab44c2504872ff02ae37be9c294fa8abea3754074e61eab4
+    environment:
+      CONTAINERS: "1"
+      POST: "0"
+      PING: "1"
+      VERSION: "1"
+      LOG_LEVEL: warning
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ../config/docker-proxy-haproxy.cfg.template:/usr/local/etc/haproxy/haproxy.cfg.template:ro
+    networks: [observation]
+
+  server:
+    build:
+      context: ..
+    environment:
+      DOCKER_API_BASE: http://docker-proxy:2375
+      DISK_PROBE_PATH: /tmp
+      STATE_DIR: /app/state
+      LOG_PROFILES_PATH: /app/config/log-profiles.json
+      ANALYSIS_PROVIDER: "${ANALYSIS_PROVIDER:-ollama}"
+      OLLAMA_API_BASE: http://ollama:11434
+      MAX_LOG_CHARS: "1000"
+      SHADOW_TEST_PROJECT: "${COMPOSE_PROJECT_NAME:?Use an explicit temporary Compose project}"
+    command:
+      - python
+      - -c
+      - |
+        import server
+        import json, os
+        project = os.environ["SHADOW_TEST_PROJECT"]
+        server.docker_containers = lambda: server.docker_get("/containers/json", params={
+            "all": "true", "filters": json.dumps({"label": ["com.docker.compose.project=" + project]})
+        }).json()
+        server.mcp.run(transport="streamable-http")
+    labels:
+      io.shadowofintent.mcp.enabled: "true"
+    volumes:
+      - test-state:/app/state
+      - ../config/log-profiles.json:/app/config/log-profiles.json:ro
+    read_only: true
+    tmpfs:
+      - /tmp:uid=10001,gid=10001
+      - /fault-state:size=1m,uid=10001,gid=10001
+    depends_on: [docker-proxy]
+    networks: [observation]
+
+  log-fixture:
+    image: python:3.14-slim@sha256:cd89c30eda26ee911a4611b18680086e0ea42e6f5f8cbe653d07fa7958c9cec8
+    command:
+      - python
+      - -u
+      - -c
+      - |
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                for number in range(40):
+                    print(f"ERROR integration-log-{number:03d} {'x' * 30}", flush=True)
+                self.send_response(204)
+                self.end_headers()
+            def log_message(self, *args):
+                pass
+        HTTPServer(('0.0.0.0', 8001), Handler).serve_forever()
+    labels:
+      io.shadowofintent.mcp.enabled: "true"
+    networks: [observation]
+
+  rotation-fixture:
+    image: python:3.14-slim@sha256:cd89c30eda26ee911a4611b18680086e0ea42e6f5f8cbe653d07fa7958c9cec8
+    logging:
+      driver: json-file
+      options:
+        max-size: "8k"
+        max-file: "2"
+    command:
+      - python
+      - -u
+      - -c
+      - |
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from urllib.parse import urlsplit, parse_qs
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                args = parse_qs(urlsplit(self.path).query)
+                prefix = args.get('prefix', ['fixture'])[0]
+                count = min(5000, int(args.get('count', ['12'])[0]))
+                for number in range(count):
+                    print(f"ERROR {prefix}-{number:05d} {'r' * 80}", flush=True)
+                self.send_response(204)
+                self.end_headers()
+            def log_message(self, *args):
+                pass
+        HTTPServer(('0.0.0.0', 8002), Handler).serve_forever()
+    networks: [observation]
+
+networks:
+  observation:
+    internal: true
+
+volumes:
+  test-state:

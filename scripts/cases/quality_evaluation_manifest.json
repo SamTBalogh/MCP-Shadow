@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "corpus_sha256": "5254460a457d6b7adcd220a741a2a44d615f91a7a702ae9237cbe2b81e58a601",
+  "status": "reserved_unexecuted",
+  "provenance": "synthetic",
+  "policy": "Do not inspect model outputs from this set while tuning prompts, validators or scoring. Retire it to regression coverage after investigation-driven changes.",
+  "as_of": "2026-10-29",
+  "usage_tracking": "Authoring declaration, not an automatic usage log. Any execution or investigation must be recorded by its operator."
+}

@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install dependencies
+        run: python -m pip install --require-hashes --only-binary=:all: -r requirements-hashed.txt
+      - name: Check dependencies
+        run: python -m pip check
+      - name: Check server imports
+        run: python -c "import server"
+      - name: Run contract tests
+        run: python -m unittest discover -s tests -v
+      - name: Validate example Compose configuration
+        run: docker compose --env-file .env.example -p mcp-shadow-ci-config config --quiet
+      - name: Run isolated Docker and official MCP client checks
+        run: bash scripts/run_integration.sh

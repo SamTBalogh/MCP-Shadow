@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "profiles": {
+    "generic": {
+      "ignore_patterns": []
+    },
+    "nginx": {
+      "ignore_patterns": []
+    },
+    "homepage": {
+      "ignore_patterns": [
+        "(?i)<httpProxy>\\s+Error calling http://mcp-shadow:8000/health",
+        "(?i)Error:\\s+connect\\s+ECONNREFUSED\\s+[0-9a-f.:]+:8000"
+      ]
+    },
+    "code-server": {
+      "ignore_patterns": [
+        "(?i)Use\\s+`node --trace-deprecation.*to show where the warning was created"
+      ]
+    },
+    "docker-proxy": {
+      "ignore_patterns": [
+        "(?i)Proxy\\s+\\S+\\s+stopped\\s+\\(cumulated conns:",
+        "(?i)Current worker\\s+\\([0-9]+\\)\\s+exited with code 0",
+        "(?i)All workers exited\\.\\s+Exiting\\.\\.\\.\\s+\\(0\\)",
+        "(?i)Exiting Master process"
+      ]
+    }
+  }
+}

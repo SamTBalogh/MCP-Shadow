@@ -1,0 +1,181 @@
+services:
+
+  docker-proxy:
+
+    image: ghcr.io/tecnativa/docker-socket-proxy@sha256:753044cb0851ce53ab44c2504872ff02ae37be9c294fa8abea3754074e61eab4
+
+    labels:
+      io.shadowofintent.mcp.enabled: "true"
+      io.shadowofintent.mcp.name: "Docker Socket Proxy"
+      io.shadowofintent.mcp.description: "Read-only proxy for the Docker API"
+      io.shadowofintent.mcp.log-profile: "docker-proxy"
+      io.shadowofintent.mcp.expected-stopped: "false"
+
+    restart: unless-stopped
+
+    environment:
+
+      CONTAINERS: "1"
+
+      POST: "0"
+
+      EVENTS: "0"
+
+      PING: "1"
+
+      VERSION: "1"
+
+      INFO: "0"
+
+      EXEC: "0"
+
+      IMAGES: "0"
+
+      NETWORKS: "0"
+
+      VOLUMES: "0"
+
+      SYSTEM: "0"
+
+      AUTH: "0"
+
+      SECRETS: "0"
+
+      LOG_LEVEL: warning
+
+    volumes:
+
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./config/docker-proxy-haproxy.cfg.template:/usr/local/etc/haproxy/haproxy.cfg.template:ro
+
+    networks:
+
+      - docker-observation
+
+  mcp-shadow:
+
+    image: "${COMPOSE_PROJECT_NAME:-mcp-shadow}-server:experimental"
+
+    build:
+
+      context: .
+
+      dockerfile: Dockerfile
+
+    labels:
+      io.shadowofintent.mcp.enabled: "true"
+      io.shadowofintent.mcp.name: "MCP Shadow"
+      io.shadowofintent.mcp.description: "Read-only observability server for the homelab"
+      io.shadowofintent.mcp.log-profile: "generic"
+      io.shadowofintent.mcp.expected-stopped: "false"
+
+    restart: unless-stopped
+
+    depends_on:
+
+      - docker-proxy
+
+    ports:
+
+      - "${MCP_BIND_ADDRESS:-127.0.0.1}:${MCP_PORT:-8010}:8000"
+
+    environment:
+
+      TZ: "${TZ:-UTC}"
+
+      SERVER_NAME: "${SERVER_NAME:-mcp-shadow}"
+
+      MCP_PORT: "${MCP_PORT:-8010}"
+      MCP_ALLOWED_HOSTS: "${MCP_ALLOWED_HOSTS:-}"
+      MCP_ALLOWED_ORIGINS: "${MCP_ALLOWED_ORIGINS:-}"
+
+      DOCKER_API_BASE: http://docker-proxy:2375
+
+      DISK_PROBE_PATH: /host/disk
+
+      MAX_LOG_LINES: "${MAX_LOG_LINES:-200}"
+
+      MAX_LOG_CHARS: "${MAX_LOG_CHARS:-50000}"
+
+      ANALYSIS_PROVIDER: "${ANALYSIS_PROVIDER:-ollama}"
+      ANALYSIS_FAILURE_THRESHOLD: "${ANALYSIS_FAILURE_THRESHOLD:-2}"
+      ANALYSIS_COOLDOWN_SECONDS: "${ANALYSIS_COOLDOWN_SECONDS:-30}"
+      LOG_SPOOL_TOTAL_MAX_BYTES: "${LOG_SPOOL_TOTAL_MAX_BYTES:-1073741824}"
+      LOG_SPOOL_MIN_FREE_BYTES: "${LOG_SPOOL_MIN_FREE_BYTES:-67108864}"
+      LOG_SPOOL_MAX_BYTES: "${LOG_SPOOL_MAX_BYTES:-268435456}"
+
+      OLLAMA_API_BASE: "${OLLAMA_API_BASE:-http://ollama:11434}"
+
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-qwen3.5}"
+
+      OLLAMA_TIMEOUT_SECONDS: "${OLLAMA_TIMEOUT_SECONDS:-180}"
+
+      OLLAMA_MAX_INPUT_CHARS: "${OLLAMA_MAX_INPUT_CHARS:-5000}"
+      OLLAMA_THINK: "${OLLAMA_THINK:-false}"
+      OLLAMA_TEMPERATURE: "${OLLAMA_TEMPERATURE:-0}"
+
+      DIAGNOSTIC_CACHE_TTL_SECONDS: "${DIAGNOSTIC_CACHE_TTL_SECONDS:-120}"
+
+      DOCKER_WORKERS: "${DOCKER_WORKERS:-4}"
+
+
+    volumes:
+
+      - "${DISK_PROBE_SOURCE:-./disk-probe}:/host/disk:ro"
+      - "${MCP_STATE_PATH:-./state}:/app/state"
+      - ./config/log-profiles.json:/app/config/log-profiles.json:ro
+
+    read_only: true
+
+    tmpfs:
+
+      - /tmp
+
+    cap_drop:
+
+      - ALL
+
+    security_opt:
+
+      - no-new-privileges:true
+
+    networks:
+
+      - docker-observation
+
+      - homelab-monitoring
+
+    healthcheck:
+
+      test:
+
+        - CMD
+
+        - python
+
+        - -c
+
+        - >
+          import socket;
+          socket.create_connection(
+          ('127.0.0.1', 8000), 2
+          ).close()
+
+      interval: 30s
+
+      timeout: 5s
+
+      retries: 3
+
+
+networks:
+
+  docker-observation:
+
+    internal: true
+
+  homelab-monitoring:
+
+    external: true
+
+    name: "${MONITORING_NETWORK:-homelab-monitoring}"
