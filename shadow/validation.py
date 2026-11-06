@@ -148,8 +148,9 @@ def _finding(finding, fields):
 
 def diagnostic_sources(snapshot):
     facts = snapshot["objective_data"]
-    state = {key: value for key, value in facts.items() if key not in {"cpu_percent", "memory", "network", "processes"}}
-    metrics = {key: value for key, value in facts.items() if key in {"cpu_percent", "memory", "network", "processes"}}
+    metric_fields = {"cpu_percent", "memory", "network", "processes", "metrics_available", "metrics_error", "metric_status", "metrics_observed_at", "metrics_sampled_at"}
+    state = {key: value for key, value in facts.items() if key not in metric_fields}
+    metrics = {key: value for key, value in facts.items() if key in metric_fields}
     return {"state": json.dumps(state, ensure_ascii=False, indent=2),
             "metrics": json.dumps(metrics, ensure_ascii=False, indent=2), "logs": snapshot["logs"]}
 

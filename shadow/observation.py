@@ -5,6 +5,8 @@ from typing import Any, Callable
 from datetime import datetime, timezone
 
 from mcp.server.fastmcp.exceptions import ToolError
+from shadow.monitoring import observation_health
+from shadow.recovery import interval_id, public_gap
 
 
 class ObservationService:
@@ -39,6 +41,10 @@ class ObservationService:
         next_baseline["last_acknowledged_delivery"] = baseline.get("last_acknowledged_delivery")
         log_activity = self.collect_new_container_logs(baseline, baseline_exists)
         result["log_activity"] = log_activity
+        result["monitoring"] = observation_health(result, baseline.get("monitoring"))
+        next_baseline["monitoring"] = result["monitoring"]
+        next_baseline["log_gaps"] = baseline.get("log_gaps", [])
+        result["log_gaps"] = [public_gap(gap) for gap in next_baseline["log_gaps"]]
         result["event_interpretation"] = self.safe_interpret_relevant_events(log_activity)
         updated_fingerprints, fingerprint_warnings = (
             self.normalize_event_fingerprint_store(
@@ -96,6 +102,7 @@ class ObservationService:
             # delivered pages and fingerprints for the fixed log interval.
             checkpoint = dict(baseline)
             checkpoint["log_progress"] = progress
+            checkpoint["monitoring"] = result["monitoring"]
             checkpoint["event_fingerprints"] = updated_fingerprints
             self.save_baseline(checkpoint)
             progress_saved = True
@@ -129,7 +136,14 @@ class ObservationService:
                 "did not complete successfully."
             )
 
+        if not baseline_saved and not progress_saved:
+            checkpoint = dict(baseline)
+            checkpoint["monitoring"] = result["monitoring"]
+            self.save_baseline(checkpoint)
+
         result["baseline"] = {
+            "monitoring_saved": True,
+            "interval_id": interval_id(progress),
             "existed": baseline_exists,
             "initialized": (not baseline_exists and baseline_saved),
             "saved": baseline_saved,

@@ -20,6 +20,7 @@ EXPECTED_TOOLS = {
     "diagnose_container",
     "generate_server_report",
     "acknowledge_server_report",
+    "close_incomplete_log_interval",
 }
 
 EXPECTED_RESOURCE = {"function": "server_inventory", "uri": "server://inventory"}
@@ -164,6 +165,7 @@ class PublicContractTests(unittest.TestCase):
                 "defaults": {"lines_per_container": 50, "acknowledged_delivery": False},
             },
             "acknowledge_server_report": {"parameters": ["delivery_id"], "defaults": {}},
+            "close_incomplete_log_interval": {"parameters": ["interval_id", "reason"], "defaults": {}},
             "server_inventory": {"parameters": [], "defaults": {}},
         }
 

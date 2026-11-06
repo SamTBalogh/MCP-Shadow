@@ -28,3 +28,5 @@ jobs:
         run: docker compose --env-file .env.example -p mcp-shadow-ci-config config --quiet
       - name: Run isolated Docker and official MCP client checks
         run: bash scripts/run_integration.sh
+      - name: Verify observation and recovery scenarios
+        run: bash scripts/run_integration.sh --resilience

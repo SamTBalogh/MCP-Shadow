@@ -70,6 +70,7 @@ class Settings:
     mcp_allowed_origins: tuple[str, ...]
     docker_api_base: str
     docker_workers: int
+    expected_container_names: tuple[str, ...]
     disk_probe_path: str
     max_log_lines: int
     max_log_chars: int
@@ -102,6 +103,9 @@ class Settings:
         memory = _number(values, "SUSTAINED_MEMORY_THRESHOLD_PERCENT", "85", minimum=1, maximum=100)
         _number(values, "SUSTAINED_MEMORY_HIGH_THRESHOLD_PERCENT", "95", minimum=memory, maximum=100)
         _number(values, "SUSTAINED_METRIC_SAMPLES", "3", minimum=2, maximum=20, integer=True)
+        _number(values, "SUSTAINED_MIN_DURATION_SECONDS", "120", minimum=1, maximum=86400)
+        _number(values, "SUSTAINED_MAX_SAMPLE_GAP_SECONDS", "300", minimum=1, maximum=86400)
+        _number(values, "METRIC_MAX_AGE_SECONDS", "300", minimum=1, maximum=86400)
         provider = _text(values, "ANALYSIS_PROVIDER", "ollama").strip()
         if provider not in {"ollama", "disabled"} and not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*", provider):
             raise SettingsError("ANALYSIS_PROVIDER must be ollama, disabled, or module:factory.")
@@ -124,6 +128,7 @@ class Settings:
             + _header_values(values, "MCP_ALLOWED_ORIGINS", rf"https?://{authority}"),
             docker_api_base=_url(values, "DOCKER_API_BASE", "http://docker-proxy:2375"),
             docker_workers=_number(values, "DOCKER_WORKERS", "4", minimum=1, maximum=8, integer=True),
+            expected_container_names=_header_values(values, "EXPECTED_CONTAINER_NAMES", r"[a-zA-Z0-9][a-zA-Z0-9_.-]*"),
             disk_probe_path=_text(values, "DISK_PROBE_PATH", "/host/disk"),
             max_log_lines=_number(values, "MAX_LOG_LINES", "200", minimum=1, integer=True),
             max_log_chars=_number(values, "MAX_LOG_CHARS", "50000", minimum=1000, integer=True),

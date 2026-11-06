@@ -6,6 +6,18 @@ from typing import Any
 from mcp.server.fastmcp.exceptions import ToolError
 
 
+class DockerHTTPError(ToolError):
+    """A failed proxy request with a machine-readable HTTP status."""
+
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        super().__init__(f"The Docker proxy returned HTTP {status_code}.")
+
+
+class ContainerNotFoundError(ToolError):
+    """Confirmed absence from a container lookup or inspection."""
+
+
 class DockerClient:
     def __init__(self, base_url: str, http: Any, timeout: float = 8):
         self.base_url = base_url
@@ -34,9 +46,7 @@ class DockerClient:
             response.raise_for_status()
             return response
         except self.http.HTTPStatusError as exception:
-            raise ToolError(
-                f"The Docker proxy returned HTTP {exception.response.status_code}."
-            ) from exception
+            raise DockerHTTPError(exception.response.status_code) from exception
         except self.http.RequestError as exception:
             raise ToolError("The Docker proxy could not be reached.") from exception
 
@@ -54,9 +64,7 @@ class DockerClient:
                     data.extend(chunk)
             return bytes(data), False
         except self.http.HTTPStatusError as exception:
-            raise ToolError(
-                f"The Docker proxy returned HTTP {exception.response.status_code}."
-            ) from exception
+            raise DockerHTTPError(exception.response.status_code) from exception
         except self.http.RequestError as exception:
             raise ToolError("The Docker proxy could not be reached.") from exception
 
@@ -67,8 +75,6 @@ class DockerClient:
                 response.raise_for_status()
                 yield from response.iter_raw(chunk_size=8192)
         except self.http.HTTPStatusError as exception:
-            raise ToolError(
-                f"The Docker proxy returned HTTP {exception.response.status_code}."
-            ) from exception
+            raise DockerHTTPError(exception.response.status_code) from exception
         except self.http.RequestError as exception:
             raise ToolError("The Docker proxy could not be reached.") from exception

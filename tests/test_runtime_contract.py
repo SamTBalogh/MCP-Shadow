@@ -175,7 +175,9 @@ class RuntimeContractTests(unittest.TestCase):
             patch.object(self.server, "_save_baseline") as save,
         ):
             result = self.server._run_locked_objective_server_cycle()
-        save.assert_not_called()
+        self.assertEqual(save.call_args.args[0]["last_run"], baseline["last_run"])
+        self.assertEqual(save.call_args.args[0]["containers"], baseline["containers"])
+        self.assertTrue(result["baseline"]["monitoring_saved"])
         self.assertFalse(result["baseline"]["saved"])
         self.assertEqual(result["baseline"]["truncated_queries"], 1)
         self.assertIn("exceeded", result["baseline"]["reason_not_saved"])

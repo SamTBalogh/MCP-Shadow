@@ -116,14 +116,22 @@ def _report_markdown(report: dict[str, Any], server_name: str) -> str:
         storage_percent = 0.0
 
     storage_text = f"{storage_percent:.1f}".replace(".", ",")
+    inspection_errors = int(summary.get("inspection_errors", 0) or 0)
+    metrics_errors = int(summary.get("metrics_errors", 0) or 0)
+    inventory_errors = int(summary.get("inventory_errors", 0) or 0)
+    status = _report_status_label(report.get("overall_severity", "no_indication"))
+    if inspection_errors or metrics_errors or inventory_errors:
+        status = "INCOMPLETE OBSERVATION" if status == "OPERATIONAL" else status + " (INCOMPLETE OBSERVATION)"
     lines = [
         server_name,
         "",
         "Status:",
-        _report_status_label(report.get("overall_severity", "no_indication")),
+        status,
         "",
         "Changes:",
     ]
+    if report.get("log_gaps"):
+        lines.insert(4, f"Log coverage: {len(report['log_gaps'])} interval(s) explicitly closed with lost coverage; see log_gaps.")
     objective_changes = []
 
     for change in changes:
@@ -206,6 +214,12 @@ def _report_markdown(report: dict[str, Any], server_name: str) -> str:
 
     missing = int(summary.get("not_found", 0) or 0)
 
+    if inventory_errors:
+        lines.append("• Docker inventory unavailable; service coverage is unknown")
+
+    if inspection_errors:
+        lines.append(f"• {inspection_errors} container inspection(s) unavailable; state unknown")
+
     if missing > 0:
         lines.append(
             "• "
@@ -215,9 +229,12 @@ def _report_markdown(report: dict[str, Any], server_name: str) -> str:
     cpu_sustained = int(summary.get("sustained_high_cpu", 0) or 0)
     memory_sustained = int(summary.get("sustained_high_memory", 0) or 0)
     lines.extend(["", "Resources:", (f"• Disk: {storage_text} %")])
+    if metrics_errors:
+        lines.append(f"• Statistics unavailable for {metrics_errors} service(s)")
 
     if cpu_sustained == 0 and memory_sustained == 0:
-        lines.append("• No sustained high CPU or memory usage")
+        lines.append("• No sustained high CPU or memory usage" +
+                     (" confirmed; observations incomplete" if inspection_errors or metrics_errors or inventory_errors else ""))
 
     else:
         if cpu_sustained > 0:
@@ -377,6 +394,18 @@ class ReportService:
         if not isinstance(baseline, dict):
             baseline = {}
 
+        collection_errors = []
+        if cycle.get("inventory_error"):
+            collection_errors.append({"origin": "docker", "operation": "inventory",
+                                      "error": _redact_sensitive_text(str(cycle["inventory_error"]))})
+        for container in cycle.get("containers", []):
+            for operation, field in (("inspection", "inspection_error"), ("metrics", "metrics_error")):
+                if container.get(field):
+                    collection_errors.append({
+                        "origin": container["name"], "operation": operation,
+                        "error": _redact_sensitive_text(str(container[field])),
+                    })
+
         report: dict[str, Any] = {
             "server": self.server_name,
             "generated_at": cycle.get("generated_at"),
@@ -384,6 +413,9 @@ class ReportService:
             "uses_model": bool(interpretation.get("executed", False)),
             "overall_severity": cycle.get("overall_severity", "no_indication"),
             "summary": cycle.get("summary", {}),
+            "collection_errors": collection_errors,
+            "monitoring": cycle.get("monitoring", {}),
+            "log_gaps": cycle.get("log_gaps", []),
             "storage": cycle.get("storage", {}),
             "changes": changes,
             "incidents": incidents,

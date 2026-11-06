@@ -4,8 +4,10 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from mcp.server.fastmcp.exceptions import ToolError
-from formatting import decode_docker_logs, decode_docker_logs_prefix, human_bytes
+from formatting import decode_docker_logs, decode_docker_logs_prefix
 from shadow.log_pages import read_page
+from shadow.statistics import parse_statistics
+from shadow.docker_client import ContainerNotFoundError, DockerHTTPError
 
 
 class ContainerService:
@@ -65,12 +67,22 @@ class ContainerService:
         """Return detailed information for a managed container. Environment variables are never returned."""
 
         container = self.find_container(container_name)
-        details = self.docker_get(f"/containers/{container['Id']}/json").json()
+        try:
+            details = self.docker_get(f"/containers/{container['Id']}/json").json()
+        except DockerHTTPError as exception:
+            if exception.status_code == 404:
+                raise ContainerNotFoundError("The inspected container was not found.") from exception
+            raise
+        except ValueError as exception:
+            raise ToolError("Docker returned invalid inspection data.") from exception
+        if not isinstance(details, dict) or not isinstance(details.get("State"), dict):
+            raise ToolError("Docker inspection data has an unexpected format.")
         state = details.get("State", {})
         health = state.get("Health", {})
         networks = details.get("NetworkSettings", {}).get("Networks", {})
         return {
             "name": details.get("Name", "").lstrip("/"),
+            "container_id": container["Id"],
             "image": details.get("Config", {}).get("Image", ""),
             "state": state.get("Status", "unknown"),
             "running": state.get("Running", False),
@@ -96,63 +108,14 @@ class ContainerService:
         """Return CPU, memory, network traffic, and process statistics for a managed container."""
 
         container = self.find_container(container_name)
-        stats = self.docker_get(
-            f"/containers/{container['Id']}/stats", params={"stream": "false"}
-        ).json()
-        cpu_stats = stats.get("cpu_stats", {})
-        previous_cpu_stats = stats.get("precpu_stats", {})
-        cpu_usage = cpu_stats.get("cpu_usage", {})
-        previous_cpu_usage = previous_cpu_stats.get("cpu_usage", {})
-        cpu_delta = cpu_usage.get("total_usage", 0) - previous_cpu_usage.get(
-            "total_usage", 0
-        )
-        system_delta = cpu_stats.get("system_cpu_usage", 0) - previous_cpu_stats.get(
-            "system_cpu_usage", 0
-        )
-        online_cpus = (
-            cpu_stats.get("online_cpus") or len(cpu_usage.get("percpu_usage", [])) or 1
-        )
-        cpu_percent = 0
-
-        if cpu_delta > 0 and system_delta > 0:
-            cpu_percent = cpu_delta / system_delta * online_cpus * 100
-
-        memory_stats = stats.get("memory_stats", {})
-        memory_usage = int(memory_stats.get("usage", 0))
-        memory_details = memory_stats.get("stats", {})
-        inactive_file = int(
-            memory_details.get(
-                "total_inactive_file", memory_details.get("inactive_file", 0)
-            )
-        )
-        memory_working_set = max(0, memory_usage - inactive_file)
-        memory_limit = int(memory_stats.get("limit", 0))
-
-        if memory_limit:
-            memory_percent = memory_working_set / memory_limit * 100
-
-        else:
-            memory_percent = 0
-
-        networks = stats.get("networks", {})
-        received_bytes = sum(
-            int(network.get("rx_bytes", 0)) for network in networks.values()
-        )
-        sent_bytes = sum(int(network.get("tx_bytes", 0)) for network in networks.values())
-        return {
-            "name": container_name.strip().lstrip("/"),
-            "cpu_percent": round(cpu_percent, 2),
-            "memory": {
-                "usage": human_bytes(memory_working_set),
-                "limit": human_bytes(memory_limit),
-                "percent": round(memory_percent, 2),
-            },
-            "network": {
-                "received": human_bytes(received_bytes),
-                "sent": human_bytes(sent_bytes),
-            },
-            "processes": stats.get("pids_stats", {}).get("current", 0),
-        }
+        try:
+            stats = self.docker_get(
+                f"/containers/{container['Id']}/stats", params={"stream": "false"}
+            ).json()
+            metrics = parse_statistics(stats)
+        except (ToolError, ValueError, TypeError) as exception:
+            metrics = parse_statistics(error=str(exception))
+        return {"name": container_name.strip().lstrip("/"), "container_id": container["Id"], **metrics}
 
     def logs(self, container_name: str, lines: int, since: int | None = None) -> dict[str, Any]:
         """Fetch and validate logs for a managed container."""

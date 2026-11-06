@@ -83,7 +83,7 @@ def attach_references(result, operation, data, container_name=""):
             else:
                 sources = []
                 for key, value in data["objective_data"].items():
-                    is_metric = key in {"cpu_percent", "memory", "network", "processes"}
+                    is_metric = key in {"cpu_percent", "memory", "network", "processes", "metrics_available", "metrics_error", "metric_status", "metrics_observed_at", "metrics_sampled_at"}
                     if is_metric == (kind == "metrics"):
                         sources.append((f"/objective_data/{_pointer(key)}", data["name"],
                                         json.dumps({key: value}, ensure_ascii=False, indent=2)))

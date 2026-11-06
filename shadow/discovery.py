@@ -6,6 +6,7 @@ import time
 from typing import Any, Callable
 
 from mcp.server.fastmcp.exceptions import ToolError
+from shadow.docker_client import ContainerNotFoundError
 
 MCP_ENABLED_LABEL = "io.shadowofintent.mcp.enabled"
 MCP_NAME_LABEL = "io.shadowofintent.mcp.name"
@@ -46,22 +47,26 @@ def container_metadata(container: dict[str, Any]) -> dict[str, Any]:
 class ContainerRegistry:
     """Discover and cache containers without exposing unmanaged containers."""
 
-    def __init__(self, list_containers: Callable, ttl_seconds: float):
+    def __init__(self, list_containers: Callable, ttl_seconds: float, expected_names=()):
         self.list_containers = list_containers
         self.ttl_seconds = ttl_seconds
+        self.expected_names = frozenset(expected_names)
         self._cache: tuple[float, list[dict[str, Any]]] | None = None
         self._lock = threading.Lock()
 
-    def managed(self, force_refresh: bool = False) -> list[dict[str, Any]]:
+    def _inventory(self, force_refresh: bool = False) -> list[dict[str, Any]]:
         with self._lock:
             now = time.monotonic()
             if (not force_refresh and self._cache is not None
                     and now - self._cache[0] < self.ttl_seconds):
                 return [dict(container) for container in self._cache[1]]
-            containers = [container for container in self.list_containers()
-                          if label_is_true(container_labels(container).get(MCP_ENABLED_LABEL))]
+            containers = self.list_containers()
             self._cache = (time.monotonic(), containers)
             return [dict(container) for container in containers]
+
+    def managed(self, force_refresh: bool = False) -> list[dict[str, Any]]:
+        return [container for container in self._inventory(force_refresh)
+                if label_is_true(container_labels(container).get(MCP_ENABLED_LABEL))]
 
     def names(self) -> set[str]:
         return {name for container in self.managed() for name in container_names(container)}
@@ -73,12 +78,14 @@ class ContainerRegistry:
 
     def find(self, name: str) -> dict[str, Any]:
         normalized = name.strip().lstrip("/")
-        if normalized not in self.names():
-            raise ToolError(f"Container '{normalized}' is not managed by MCP.")
-        for container in self.managed():
+        for container in self._inventory():
             if normalized in container_names(container):
+                if not label_is_true(container_labels(container).get(MCP_ENABLED_LABEL)):
+                    raise ToolError(f"Container '{normalized}' is not managed by MCP.")
                 return container
-        raise ToolError(f"Container '{normalized}' was not found.")
+        if normalized in self.expected_names:
+            raise ContainerNotFoundError(f"Expected container '{normalized}' was not found.")
+        raise ToolError(f"Container '{normalized}' is not managed by MCP.")
 
     def list_services(self, load_profiles: Callable, resolve_profile: Callable) -> list[dict[str, Any]]:
         """List services currently managed through MCP Docker labels. The response includes human-readable metadata, Compose identity, log-profile resolution, and current Docker state."""

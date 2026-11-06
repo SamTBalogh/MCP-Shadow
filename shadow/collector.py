@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from mcp.server.fastmcp.exceptions import ToolError
+from shadow.docker_client import ContainerNotFoundError
+from shadow.statistics import parse_statistics
 from shadow.events import (
     _classify_event_relevance, _event_fingerprint,
     _group_log_lines_into_events, _maximum_severity,
@@ -26,6 +28,7 @@ class ObservationCollector:
         objective_snapshot: Callable, docker_workers: int, baseline_version: int,
         max_log_lines: int, get_log_page: Callable | None = None,
         managed_log_ids: Callable[[], dict[str, str]] | None = None,
+        expected_names: Callable[[], set[str]] = set,
     ):
         if get_log_page is not None and managed_log_ids is None:
             raise ValueError("Paged log collection requires managed container identities.")
@@ -45,6 +48,7 @@ class ObservationCollector:
         self.max_log_lines = max_log_lines
         self.get_log_page = get_log_page
         self.managed_log_ids = managed_log_ids
+        self.expected_names = expected_names
 
     def snapshot(self, container_name: str) -> dict[str, Any]:
         """Collect objective signals for the current container state. This function does not inspect logs or calculate severity."""
@@ -53,10 +57,10 @@ class ObservationCollector:
         inspection = self.inspect_container(normalized_name)
         running = bool(inspection.get("running", False))
         metrics: dict[str, Any] = {
-            "cpu_percent": 0.0,
-            "memory": {"usage": "0.0 B", "limit": "0.0 B", "percent": 0.0},
-            "network": {"received": "0.0 B", "sent": "0.0 B"},
-            "processes": 0,
+            "cpu_percent": None,
+            "memory": {"usage": None, "limit": None, "percent": None},
+            "network": {"received": None, "sent": None},
+            "processes": None,
         }
         metrics_available = False
         metrics_error = ""
@@ -65,15 +69,23 @@ class ObservationCollector:
             try:
                 current_metrics = self.get_stats(normalized_name)
 
-                if isinstance(current_metrics, dict):
-                    metrics.update(current_metrics)
-                    metrics_available = True
+                if not isinstance(current_metrics, dict) or not current_metrics:
+                    raise ToolError("Docker statistics have an unexpected format.")
+                if current_metrics.get("container_id") != inspection.get("container_id"):
+                    raise ToolError("The container changed while statistics were collected.")
+                metrics.update(current_metrics)
+                metrics_available = bool(current_metrics.get("metrics_available", True))
+                metrics_error = str(current_metrics.get("metrics_error", ""))
 
             except (ToolError, ValueError, TypeError) as exception:
                 metrics_error = str(exception)
+                metrics = parse_statistics(error=metrics_error)
 
         return {
             "name": normalized_name,
+            "container_id": inspection.get("container_id"),
+            "inspection_available": True,
+            "inspection_error": "",
             "state": str(inspection.get("state", "unknown")),
             "running": running,
             "expected_stopped": normalized_name in self.expected_stopped_names(),
@@ -86,17 +98,20 @@ class ObservationCollector:
             "finished_at": inspection.get("finished_at"),
             "metrics_available": metrics_available,
             "metrics_error": metrics_error,
-            "cpu_percent": float(metrics.get("cpu_percent", 0.0) or 0.0),
+            "metric_status": metrics.get("metric_status", {}),
+            "metrics_observed_at": metrics.get("metrics_observed_at"),
+            "metrics_sampled_at": metrics.get("metrics_sampled_at"),
+            "cpu_percent": metrics.get("cpu_percent"),
             "memory": {
-                "usage": metrics.get("memory", {}).get("usage", "0.0 B"),
-                "limit": metrics.get("memory", {}).get("limit", "0.0 B"),
-                "percent": metrics.get("memory", {}).get("percent", 0.0),
+                "usage": metrics.get("memory", {}).get("usage"),
+                "limit": metrics.get("memory", {}).get("limit"),
+                "percent": metrics.get("memory", {}).get("percent"),
             },
             "network": {
-                "received": metrics.get("network", {}).get("received", "0.0 B"),
-                "sent": metrics.get("network", {}).get("sent", "0.0 B"),
+                "received": metrics.get("network", {}).get("received"),
+                "sent": metrics.get("network", {}).get("sent"),
             },
-            "processes": int(metrics.get("processes", 0) or 0),
+            "processes": metrics.get("processes"),
         }
 
     def evaluate(
@@ -107,6 +122,8 @@ class ObservationCollector:
 
         severity = "no_indication"
         findings: list[dict[str, str]] = []
+        if snapshot.get("inspection_available") is False:
+            return {"severity": severity, "findings": findings}
         state = str(snapshot.get("state", "unknown"))
         running = bool(snapshot.get("running", False))
         stopped_expected = bool(snapshot.get("expected_stopped", False))
@@ -176,19 +193,30 @@ class ObservationCollector:
         if not isinstance(previous_metrics, dict):
             previous_metrics = {}
 
+        configured_names = self.expected_names()
+        inventory_error = None
+        try:
+            discovered_names = self.managed_names()
+        except ToolError as exception:
+            inventory_error = exception
+            discovered_names = set(previous_containers)
+        names = sorted(discovered_names | configured_names)
         summary = {
-            "expected_containers": len(self.managed_names()),
+            "expected_containers": len(names),
             "running": 0,
             "stopped": 0,
             "expected_stopped": 0,
             "unexpectedly_stopped": 0,
             "not_found": 0,
+            "inspection_errors": 0,
+            "inventory_errors": int(inventory_error is not None),
             "healthy": 0,
             "unhealthy": 0,
             "no_healthcheck": 0,
             "new_restarts": 0,
             "new_ooms": 0,
             "metrics_available": 0,
+            "metrics_errors": 0,
             "sustained_high_cpu": 0,
             "sustained_high_memory": 0,
         }
@@ -199,9 +227,15 @@ class ObservationCollector:
         next_metrics: dict[str, dict[str, Any]] = {}
         general_severity = "no_indication"
 
-        names = sorted(self.managed_names())
+        if inventory_error is None:
+            for name, previous in previous_containers.items():
+                if isinstance(previous, dict) and previous.get("expected") and name not in names:
+                    changes.append({"type": "retired_service", "origin": name,
+                                    "description": "Service removed from the configured expected inventory."})
 
         def collect_snapshot(name: str):
+            if inventory_error is not None:
+                return None, inventory_error
             try:
                 return self.objective_snapshot(name), None
             except ToolError as exception:
@@ -211,29 +245,35 @@ class ObservationCollector:
             snapshots = list(executor.map(collect_snapshot, names))
 
         for name, (snapshot, error) in zip(names, snapshots):
+            absent = isinstance(error, ContainerNotFoundError)
+            inspection_available = error is None or absent
             found = error is None
             if error is not None:
                 snapshot = {
                     "name": name,
-                    "state": "not_found",
-                    "running": False,
+                    "container_id": None,
+                    "inspection_available": inspection_available,
+                    "inspection_error": "" if absent else str(error),
+                    "state": "not_found" if absent else "unknown",
+                    "running": False if absent else None,
                     "expected_stopped": False,
                     "health": "unknown",
-                    "oom_killed": False,
-                    "restarts": 0,
+                    "oom_killed": False if absent else None,
+                    "restarts": 0 if absent else None,
                     "exit_code": None,
                     "state_error": str(error),
                     "started_at": None,
                     "finished_at": None,
                     "metrics_available": False,
                     "metrics_error": "",
-                    "cpu_percent": 0.0,
-                    "memory": {"usage": "0.0 B", "limit": "0.0 B", "percent": 0.0},
-                    "network": {"received": "0.0 B", "sent": "0.0 B"},
-                    "processes": 0,
+                    "cpu_percent": None,
+                    "memory": {"usage": None, "limit": None, "percent": None},
+                    "network": {"received": None, "sent": None},
+                    "processes": None,
                 }
 
             previous = previous_containers.get(name)
+            snapshot = {**snapshot, "expected": name in configured_names}
             comparison = _compare_container_with_baseline(
                 snapshot, previous, baseline_exists
             )
@@ -245,21 +285,15 @@ class ObservationCollector:
             metric_evaluation = _evaluate_sustained_metrics(metric_entry)
             next_metrics[name] = metric_entry
 
-            if bool(metric_entry.get("metrics_available", False)):
+            if bool(snapshot.get("metrics_available", False)):
                 summary["metrics_available"] += 1
+            if snapshot.get("metrics_error"):
+                summary["metrics_errors"] += 1
 
-            required_metric_samples = int(metric_entry.get("required_samples", 3) or 3)
-
-            if (
-                int(metric_entry.get("consecutive_high_cpu", 0) or 0)
-                >= required_metric_samples
-            ):
+            if metric_entry["sustained_high_cpu"]:
                 summary["sustained_high_cpu"] += 1
 
-            if (
-                int(metric_entry.get("consecutive_high_memory", 0) or 0)
-                >= required_metric_samples
-            ):
+            if metric_entry["sustained_high_memory"]:
                 summary["sustained_high_memory"] += 1
 
             combined_findings = [
@@ -270,7 +304,10 @@ class ObservationCollector:
             stopped_expected = bool(snapshot["expected_stopped"])
             health = str(snapshot["health"])
 
-            if not found:
+            if not inspection_available:
+                summary["inspection_errors"] += 1
+
+            elif absent:
                 summary["not_found"] += 1
 
             elif running:
@@ -330,7 +367,12 @@ class ObservationCollector:
                     "comparison": comparison,
                 }
             )
-            next_containers[name] = _container_baseline_entry(snapshot)
+            if inspection_available:
+                next_containers[name] = _container_baseline_entry(snapshot)
+            elif isinstance(previous, dict):
+                # A query failure is not a new state observation, even when
+                # logs succeed and the rest of this baseline can be saved.
+                next_containers[name] = dict(previous)
 
         storage = self.disk_snapshot()
         storage_percent = float(storage.get("usage_percent", 0.0) or 0.0)
@@ -358,6 +400,7 @@ class ObservationCollector:
         return {
             "generated_at": generated_at,
             "overall_severity": general_severity,
+            "inventory_error": str(inventory_error) if inventory_error else "",
             "summary": summary,
             "storage": storage,
             "containers": containers,
@@ -554,7 +597,13 @@ class ObservationCollector:
         progress = baseline.get("log_progress")
         if self.get_log_page is not None:
             assert self.managed_log_ids is not None
-            managed = self.managed_log_ids()
+            try:
+                managed = self.managed_log_ids()
+            except ToolError as exception:
+                result.update(active=False, reason="inventory_unavailable", log_progress=progress)
+                result["summary"]["query_errors"] = 1
+                result["warnings"].append(str(exception))
+                return result
             if progress is None:
                 # Snapshot intervals do not overlap.
                 since, _ = self.baseline_to_since(baseline.get("last_run"), overlap_seconds=0)

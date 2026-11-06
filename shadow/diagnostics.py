@@ -9,7 +9,7 @@ import time
 from typing import Any, Callable
 
 from mcp.server.fastmcp.exceptions import ToolError
-from formatting import human_bytes
+from shadow.statistics import parse_statistics
 from shadow.events import _filter_expected_shutdown_noise, _maximum_severity, _redact_sensitive_text
 
 
@@ -47,6 +47,7 @@ class DiagnosticService:
             raise ToolError("Docker inspection data has an unexpected format.")
 
         stats_data: dict[str, Any] = {}
+        metrics_error = ""
 
         try:
             stats_result = self.docker_get(
@@ -54,11 +55,12 @@ class DiagnosticService:
                 params={"stream": "false", "one-shot": "true"},
             ).json()
 
-            if isinstance(stats_result, dict):
-                stats_data = stats_result
+            if not isinstance(stats_result, dict) or not stats_result:
+                raise ToolError("Docker statistics have an unexpected format.")
+            stats_data = stats_result
 
-        except (ToolError, ValueError):
-            stats_data = {}
+        except (ToolError, ValueError, TypeError) as exception:
+            metrics_error = str(exception)
 
         state = inspect_data.get("State", {})
 
@@ -73,88 +75,7 @@ class DiagnosticService:
         else:
             health = "not_configured"
 
-        cpu_stats = stats_data.get("cpu_stats", {})
-        previous_cpu_stats = stats_data.get("precpu_stats", {})
-
-        if not isinstance(cpu_stats, dict):
-            cpu_stats = {}
-
-        if not isinstance(previous_cpu_stats, dict):
-            previous_cpu_stats = {}
-
-        cpu_usage = cpu_stats.get("cpu_usage", {})
-        previous_cpu_usage = previous_cpu_stats.get("cpu_usage", {})
-
-        if not isinstance(cpu_usage, dict):
-            cpu_usage = {}
-
-        if not isinstance(previous_cpu_usage, dict):
-            previous_cpu_usage = {}
-
-        cpu_delta = int(cpu_usage.get("total_usage", 0) or 0) - int(
-            previous_cpu_usage.get("total_usage", 0) or 0
-        )
-        system_delta = int(cpu_stats.get("system_cpu_usage", 0) or 0) - int(
-            previous_cpu_stats.get("system_cpu_usage", 0) or 0
-        )
-        per_cpu_usage = cpu_usage.get("percpu_usage", [])
-
-        if not isinstance(per_cpu_usage, list):
-            per_cpu_usage = []
-
-        online_cpus = int(cpu_stats.get("online_cpus", 0) or len(per_cpu_usage) or 1)
-
-        if cpu_delta > 0 and system_delta > 0:
-            cpu_percent = cpu_delta / system_delta * online_cpus * 100
-
-        else:
-            cpu_percent = 0.0
-
-        memory_stats = stats_data.get("memory_stats", {})
-
-        if not isinstance(memory_stats, dict):
-            memory_stats = {}
-
-        memory_details = memory_stats.get("stats", {})
-
-        if not isinstance(memory_details, dict):
-            memory_details = {}
-
-        memory_usage = int(memory_stats.get("usage", 0) or 0)
-        inactive_file = int(
-            memory_details.get(
-                "inactive_file", memory_details.get("total_inactive_file", 0)
-            )
-            or 0
-        )
-        memory_working_set = max(0, memory_usage - inactive_file)
-        memory_limit = int(memory_stats.get("limit", 0) or 0)
-
-        if memory_limit:
-            memory_percent = memory_working_set / memory_limit * 100
-
-        else:
-            memory_percent = 0.0
-
-        networks = stats_data.get("networks", {})
-
-        if not isinstance(networks, dict):
-            networks = {}
-
-        received_bytes = 0
-        sent_bytes = 0
-
-        for network_data in networks.values():
-            if not isinstance(network_data, dict):
-                continue
-
-            received_bytes += int(network_data.get("rx_bytes", 0) or 0)
-            sent_bytes += int(network_data.get("tx_bytes", 0) or 0)
-
-        pids_stats = stats_data.get("pids_stats", {})
-
-        if not isinstance(pids_stats, dict):
-            pids_stats = {}
+        metrics = parse_statistics(stats_data, metrics_error)
 
         logs_data = self.get_logs(container_name, lines)
         raw_logs = str(logs_data.get("logs", ""))
@@ -238,17 +159,7 @@ class DiagnosticService:
             "state_error": str(state.get("Error", "")),
             "restarts": int(inspect_data.get("RestartCount", 0) or 0),
             "started_at": str(state.get("StartedAt", "")),
-            "cpu_percent": round(cpu_percent, 2),
-            "memory": {
-                "usage": human_bytes(memory_working_set),
-                "limit": human_bytes(memory_limit),
-                "percent": round(memory_percent, 2),
-            },
-            "network": {
-                "received": human_bytes(received_bytes),
-                "sent": human_bytes(sent_bytes),
-            },
-            "processes": int(pids_stats.get("current", 0) or 0),
+            **metrics,
         }
         objective_findings: list[dict[str, str]] = []
 
@@ -275,12 +186,12 @@ class DiagnosticService:
                 }
             )
 
-        if memory_percent >= 95:
+        if metrics["memory"]["percent"] is not None and metrics["memory"]["percent"] >= 95:
             objective_findings.append(
                 {"severity": "high", "finding": "Memory usage exceeds 95% of the limit."}
             )
 
-        elif memory_percent >= 85:
+        elif metrics["memory"]["percent"] is not None and metrics["memory"]["percent"] >= 85:
             objective_findings.append(
                 {"severity": "medium", "finding": "Memory usage exceeds 85% of the limit."}
             )

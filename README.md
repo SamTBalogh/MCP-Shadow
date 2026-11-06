@@ -41,7 +41,7 @@ the query. A successful run observes 40 events and returns a null model advisory
 ```json
 {
   "client": "official MCP Python SDK",
-  "tools": 11,
+  "tools": 12,
   "service": "log-fixture",
   "state": "running",
   "running": true,
@@ -147,11 +147,47 @@ No model download is automatic.
 | `inspect_container`, `get_container_stats`, `get_container_logs` | Selected container details, metrics and bounded log prefix |
 | `analyze_container_logs`, `diagnose_container` | Objective signals with optional, fallible model advice |
 | `generate_server_report`, `acknowledge_server_report` | Differential reports and optional explicit confirmation |
+| `close_incomplete_log_interval` | Explicitly accept missing log coverage, retain captured snapshots and resume future reports |
 
 The `server://inventory` resource describes capabilities; `/health` is liveness,
 `/ready` checks Docker, writable state and the probe filesystem. Optional analysis
 failure does not make objective tools unready. CPU/memory visibility depends on
 the container environment; these are not guaranteed host-wide measurements.
+
+Observation snapshots distinguish confirmed absence (`state=not_found`) from failed
+inspection (`state=unknown`, `running=null`, `inspection_available=false`, with
+`inspection_error`). A container-inspection HTTP 404 confirms absence; timeouts,
+authorization errors and proxy failures do not. Failed inspections preserve the
+last valid container baseline, so recovery compares against that observation.
+`summary.inspection_errors` and `summary.metrics_errors` expose incomplete
+coverage; reports include `collection_errors` with `origin`, `operation`
+(`inventory`, `inspection` or `metrics`) and `error`. The readable report marks incomplete
+coverage as `INCOMPLETE OBSERVATION`. Objective
+severity describes confirmed findings, so `no_indication` does not imply that
+unavailable observations were healthy.
+
+Diagnostics expose `objective_data.metrics_available` and `metrics_error`.
+Unavailable measurements are `null`, including nested values; valid measurement
+groups, state and logs remain available. `metric_status` describes availability
+and errors separately for CPU, memory, network and processes. Observation
+snapshots use the same metric fields and nulls (also when statistics are skipped
+for a stopped container). Consumers must not coerce these nulls to zero.
+
+Inspection/statistics responses, observation snapshots and persisted container
+and metric entries include `container_id`. Sustained CPU/memory counters continue
+only for the same nonempty ID. Replacement containers and legacy metric entries
+without an ID start a fresh sequence; missing samples reset the counters. If the
+current ID is unavailable, samples cannot accumulate across observations. Existing
+baselines remain readable without migration. Statistics collected for a different
+ID from the inspection are discarded as unavailable.
+
+Optional `EXPECTED_CONTAINER_NAMES` keeps configured services in reports after
+they disappear. Sustained consumption requires three samples spanning at least
+120 seconds, with at most 300 seconds between samples. Reports and `/ready`
+expose observation coverage and freshness. An explicit recovery tool can close
+an incomplete log interval while recording lost coverage and retaining captures.
+See the [observation and recovery contract](docs/observation-contract.md) for
+configuration, fields, migration behavior and retention limits.
 
 For recoverable reports, request `acknowledged_delivery=true`, durably save/process
 and **deduplicate by `delivery.id`**, then acknowledge that ID. Repeat until you

@@ -130,6 +130,8 @@ class BaselineStore:
             "log_progress": None,
             "delivery": None,
             "last_acknowledged_delivery": None,
+            "log_gaps": [],
+            "monitoring": {},
         }
 
     def load(self) -> tuple[dict[str, Any], list[str], bool]:
@@ -170,6 +172,14 @@ class BaselineStore:
         (event_fingerprints, fingerprint_warnings) = self.normalize_fingerprints(
             raw_data.get("event_fingerprints", {})
         )
+        gaps = raw_data.get("log_gaps", [])
+        if not isinstance(gaps, list) or any(not isinstance(gap, dict) or not isinstance(gap.get("progress"), dict)
+                                             or not isinstance(gap.get("interval_id"), str) for gap in gaps):
+            raise ToolError("Invalid recovery history; snapshots must be preserved.")
+        monitoring = raw_data.get("monitoring", {})
+        if (not isinstance(monitoring, dict) or not isinstance(monitoring.get("services", {}), dict)
+                or any(not isinstance(item, dict) for item in monitoring.get("services", {}).values())):
+            raise ToolError("Invalid monitoring state; the baseline was not advanced.")
         return (
             {
                 "version": self.version,
@@ -180,6 +190,8 @@ class BaselineStore:
                 "log_progress": raw_data.get("log_progress"),
                 "delivery": raw_data.get("delivery"),
                 "last_acknowledged_delivery": raw_data.get("last_acknowledged_delivery"),
+                "log_gaps": gaps,
+                "monitoring": monitoring,
             },
             fingerprint_warnings,
             True,
@@ -215,6 +227,8 @@ class BaselineStore:
             "log_progress": baseline.get("log_progress"),
             "delivery": baseline.get("delivery"),
             "last_acknowledged_delivery": baseline.get("last_acknowledged_delivery"),
+            "log_gaps": baseline.get("log_gaps", []),
+            "monitoring": baseline.get("monitoring", {}),
         }
         try:
             atomic_json(self.path, payload)

@@ -23,6 +23,8 @@ services:
       ANALYSIS_PROVIDER: "${ANALYSIS_PROVIDER:-ollama}"
       OLLAMA_API_BASE: http://ollama:11434
       MAX_LOG_CHARS: "1000"
+      CONTAINER_DISCOVERY_CACHE_TTL_SECONDS: "0"
+      EXPECTED_CONTAINER_NAMES: "${COMPOSE_PROJECT_NAME:?}-log-fixture-1"
       SHADOW_TEST_PROJECT: "${COMPOSE_PROJECT_NAME:?Use an explicit temporary Compose project}"
     command:
       - python

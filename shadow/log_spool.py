@@ -128,12 +128,19 @@ class LogSpool:
     def status(self):
         return self.budget.status()
 
-    def cleanup(self, progress):
+    def cleanup(self, progress, archived_progress=()):
         """Reclaim unused files before collecting, under the lock with no pending report."""
         if not self.directory.exists():
             return
         if progress is None:
             progress = {"containers": {}}
+        if archived_progress:
+            retained = dict(progress.get("containers", {}))
+            for index, archived in enumerate(archived_progress):
+                if not isinstance(archived, dict) or not isinstance(archived.get("containers"), dict):
+                    raise ToolError("Invalid recovery snapshots; no files were reclaimed.")
+                retained.update({f"archived/{index}/{name}": cursor for name, cursor in archived["containers"].items()})
+            progress = {"containers": retained}
         cursors = progress.get("containers") if isinstance(progress, dict) else None
         if not isinstance(cursors, dict) or any(not isinstance(cursor, dict) for cursor in cursors.values()):
             raise ToolError("The stored log progress is invalid; no snapshots were reclaimed.")

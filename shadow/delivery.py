@@ -4,6 +4,7 @@ from __future__ import annotations
 import uuid
 import re
 from copy import deepcopy
+from datetime import datetime, timezone
 
 from mcp.server.fastmcp.exceptions import ToolError
 
@@ -42,13 +43,15 @@ class ReportDelivery:
             report["baseline"]["awaiting_acknowledgement"] = True
             report["baseline"]["saved"] = False
             report["baseline"]["progress_saved"] = False
+            report["baseline"]["monitoring_saved"] = False
             if "markdown" in report:
                 report["markdown"] += "\n\nDelivery:\n• The checkpoint awaits explicit acknowledgement."
             # A failed collection may still deliver objective data, but cannot
             # commit a checkpoint that the collector did not stage.
             proposed = staged[0] if staged else deepcopy(baseline)
             proposed["last_acknowledged_delivery"] = baseline.get("last_acknowledged_delivery")
-            baseline["delivery"] = {"id": identifier, "report": report, "next_baseline": proposed}
+            baseline["delivery"] = {"id": identifier, "report": report, "next_baseline": proposed,
+                                    "created_at": datetime.now(timezone.utc).isoformat()}
             self.store.save(baseline)
             return report
 

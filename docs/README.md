@@ -8,6 +8,8 @@
   and explains how to update pinned dependencies.
 - [Report reliability](reliability-and-evaluation.md) describes report delivery,
   snapshot storage and the evaluation contract.
+- [Observation quality and recovery](observation-contract.md) covers expected
+  services, timed alerts, partial statistics, monitor health and explicit interval closure.
 - [Design decisions](design-decisions.md) explains the tradeoffs behind those features.
 
 ## Inspect the evidence

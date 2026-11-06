@@ -38,18 +38,19 @@ class EventTests(unittest.TestCase):
 class MetricsTests(unittest.TestCase):
     def test_high_cpu_must_persist_and_resets_when_sample_is_missing(self):
         snapshot = {
+            "container_id": "synthetic-id",
             "running": True,
             "metrics_available": True,
             "cpu_percent": 95,
             "memory": {"percent": 20},
         }
         with patch.dict("os.environ", {"SUSTAINED_METRIC_SAMPLES": "3"}):
-            first = _update_sustained_metric_entry(snapshot, {}, "now")
+            first = _update_sustained_metric_entry(snapshot, {}, "2026-01-01T00:00:00Z")
             self.assertEqual(
                 _evaluate_sustained_metrics(first)["severity"], "no_indication"
             )
-            second = _update_sustained_metric_entry(snapshot, first, "now")
-            third = _update_sustained_metric_entry(snapshot, second, "now")
+            second = _update_sustained_metric_entry(snapshot, first, "2026-01-01T00:01:00Z")
+            third = _update_sustained_metric_entry(snapshot, second, "2026-01-01T00:02:00Z")
             self.assertEqual(_evaluate_sustained_metrics(third)["severity"], "low")
             missing = _update_sustained_metric_entry({"running": True}, third, "now")
             self.assertEqual(missing["consecutive_high_cpu"], 0)

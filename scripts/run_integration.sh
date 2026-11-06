@@ -3,14 +3,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-if [[ $# -eq 1 && $1 == --demo ]]; then
-    mode=demo
+if [[ $# -eq 1 && ( $1 == --demo || $1 == --resilience ) ]]; then
+    mode="${1#--}"
     export ANALYSIS_PROVIDER=disabled
 elif [[ $# -eq 0 ]]; then
     mode=check
     export ANALYSIS_PROVIDER=ollama
 else
-    echo "Usage: bash scripts/run_integration.sh [--demo]" >&2
+    echo "Usage: bash scripts/run_integration.sh [--demo|--resilience]" >&2
     exit 2
 fi
 
@@ -22,6 +22,25 @@ run_demo() {
 }
 trap cleanup EXIT
 "${compose[@]}" config --quiet
+
+if [[ $mode == resilience ]]; then
+    phase() { "${compose[@]}" exec -T server python - "$1" < tests/docker_resilience_smoke.py; }
+    "${compose[@]}" up -d --build server log-fixture
+    phase normal
+    "${compose[@]}" stop docker-proxy
+    phase outage
+    "${compose[@]}" start docker-proxy
+    phase recovery
+    phase pending
+    "${compose[@]}" up -d --force-recreate --no-deps log-fixture
+    "${compose[@]}" restart server
+    phase replacement
+    "${compose[@]}" rm -s -f log-fixture
+    phase missing
+    "${compose[@]}" up -d log-fixture
+    phase returned
+    exit
+fi
 
 if [[ $mode == demo ]]; then
     "${compose[@]}" up -d --build server log-fixture

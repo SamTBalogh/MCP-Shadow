@@ -16,6 +16,8 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from shadow.reporting import ReportService, _report_markdown
 from shadow.baseline import BaselineStore
+from shadow.recovery import close_interval
+from shadow.monitoring import monitor_status
 from shadow.log_spool import LogSpool
 from shadow.delivery import ReportDelivery
 from shadow.ollama import OllamaAnalyzer
@@ -67,7 +69,8 @@ MCP_DESCRIPTION_LABEL = "io.shadowofintent.mcp.description"
 MCP_LOG_PROFILE_LABEL = "io.shadowofintent.mcp.log-profile"
 MCP_EXPECTED_STOPPED_LABEL = "io.shadowofintent.mcp.expected-stopped"
 CONTAINER_DISCOVERY_CACHE_TTL_SECONDS = SETTINGS.container_discovery_cache_ttl_seconds
-CONTAINER_REGISTRY = ContainerRegistry(lambda: docker_containers(), CONTAINER_DISCOVERY_CACHE_TTL_SECONDS)
+CONTAINER_REGISTRY = ContainerRegistry(lambda: docker_containers(), CONTAINER_DISCOVERY_CACHE_TTL_SECONDS,
+                                       SETTINGS.expected_container_names)
 
 
 class UnambiguousMCPHeaders:
@@ -149,12 +152,14 @@ def _check_readiness() -> dict[str, Any]:
     try:
         baseline, _, _ = _baseline_store().load()
         pending = baseline.get("delivery")
+        result["monitoring"] = monitor_status(baseline)
         result["report_delivery"] = {
             "awaiting_acknowledgement": pending is not None,
             "pending_report_bytes": len(json.dumps(pending.get("report", {}), ensure_ascii=False).encode()) if isinstance(pending, dict) else 0,
         }
     except ToolError:
         result["report_delivery"] = {"status": "state_unavailable"}
+        result["monitoring"] = {"status": "state_unavailable"}
     return result
 
 
@@ -487,6 +492,7 @@ def _observation_collector() -> ObservationCollector:
         inspect_container=_inspect_container, get_stats=_get_container_stats,
         expected_stopped_names=expected_stopped_container_names,
         managed_names=managed_container_names, disk_snapshot=disk_snapshot,
+        expected_names=lambda: set(SETTINGS.expected_container_names),
         normalize_fingerprints=_normalize_event_fingerprint_store,
         load_profiles=_load_log_profiles, baseline_to_since=_baseline_timestamp_to_since,
         get_logs=_get_container_logs_data, resolve_profile=_resolve_container_log_profile,
@@ -543,7 +549,8 @@ def _safe_interpret_relevant_events(log_activity: dict[str, Any]) -> dict[str, A
 def _collect_new_container_logs(baseline: dict[str, Any], baseline_exists: bool) -> dict[str, Any]:
     # A pending report can reference snapshots outside the committed checkpoint.
     if baseline.get("delivery") is None:
-        _log_spool().cleanup(baseline.get("log_progress"))
+        _log_spool().cleanup(baseline.get("log_progress"),
+                             [gap["progress"] for gap in baseline.get("log_gaps", [])])
     return _observation_collector().collect_logs(baseline, baseline_exists)
 
 
@@ -609,6 +616,12 @@ def generate_server_report(lines_per_container: int = 50, acknowledged_delivery:
 def acknowledge_server_report(delivery_id: str) -> dict[str, Any]:
     """Confirm processing of a durable report and commit its checkpoint. Retry of the most recent acknowledgement is idempotent. This does not modify Docker."""
     return ReportDelivery(_baseline_store()).acknowledge(delivery_id)
+
+
+@mcp.tool()
+def close_incomplete_log_interval(interval_id: str, reason: str) -> dict[str, Any]:
+    """Explicitly accept lost log coverage for the current interval and resume future collection. Process and acknowledge pending delivery first. Requires baseline.interval_id and a reason. Retains captured snapshots and an audit record. Retry of the same interval is idempotent. Does not modify Docker."""
+    return close_interval(_baseline_store(), interval_id, reason)
 
 
 def _get_server_inventory() -> str:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import math
+from datetime import datetime
 from typing import Any
 
 from shadow.events import _maximum_severity
@@ -42,6 +44,8 @@ def _sustained_metric_settings() -> dict[str, Any]:
         "memory_threshold_percent": memory_threshold,
         "high_memory_threshold_percent": memory_high_threshold,
         "required_samples": required_samples,
+        "min_duration_seconds": read_float("SUSTAINED_MIN_DURATION_SECONDS", 120, 1, 86400),
+        "max_sample_gap_seconds": read_float("SUSTAINED_MAX_SAMPLE_GAP_SECONDS", 300, 1, 86400),
     }
 
 
@@ -57,55 +61,92 @@ def _safe_metric_percentage(value: Any) -> float:
     return round(max(0.0, result), 2)
 
 
+def _metric_timestamp(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed if parsed.utcoffset() is not None else None
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 def _update_sustained_metric_entry(
     snapshot: dict[str, Any], previous: Any, observed_at: str
 ) -> dict[str, Any]:
-    """Update consecutive CPU and memory threshold counters. A missing or sub-threshold sample resets consecutiveness."""
+    """Require consecutive identified samples spanning a bounded time window."""
 
     settings = _sustained_metric_settings()
 
     if not isinstance(previous, dict):
         previous = {}
 
+    container_id = snapshot.get("container_id")
+    if not container_id or previous.get("container_id") != container_id:
+        # Legacy references cannot establish identity. Start a fresh sequence.
+        previous = {}
+
+    now = _metric_timestamp(observed_at)
+    last = _metric_timestamp(previous.get("observed_at"))
+    gap = (now - last).total_seconds() if now is not None and last is not None else None
+    if gap is None or gap < 0 or gap > settings["max_sample_gap_seconds"]:
+        previous = {}
+    if any(previous.get(key) != settings[key] for key in
+           ("cpu_threshold_percent", "memory_threshold_percent")):
+        previous = {}
+
     metrics_available = bool(snapshot.get("metrics_available", False))
     running = bool(snapshot.get("running", False))
-    valid_sample = metrics_available and running
-    cpu_percent = _safe_metric_percentage(snapshot.get("cpu_percent", 0.0))
+    cpu_percent = snapshot.get("cpu_percent")
     memory = snapshot.get("memory", {})
 
     if not isinstance(memory, dict):
         memory = {}
 
-    memory_percent = _safe_metric_percentage(memory.get("percent", 0.0))
+    memory_percent = memory.get("percent")
+    def available(field, value):
+        status = snapshot.get("metric_status", {}).get(field, {})
+        return (running and status.get("available", metrics_available)
+                and isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value) and value >= 0)
+    cpu_valid = available("cpu_percent", cpu_percent)
+    memory_valid = available("memory", memory_percent)
+    valid_sample = cpu_valid or memory_valid
 
-    try:
-        previous_cpu_count = max(0, int(previous.get("consecutive_high_cpu", 0) or 0))
-
-    except (TypeError, ValueError):
-        previous_cpu_count = 0
-
-    try:
-        previous_memory_count = max(
-            0, int(previous.get("consecutive_high_memory", 0) or 0)
-        )
-
-    except (TypeError, ValueError):
-        previous_memory_count = 0
-
-    cpu_high = valid_sample and cpu_percent >= float(settings["cpu_threshold_percent"])
-    memory_high = valid_sample and memory_percent >= float(
+    cpu_high = cpu_valid and cpu_percent >= float(settings["cpu_threshold_percent"])
+    memory_high = memory_valid and memory_percent >= float(
         settings["memory_threshold_percent"]
     )
-    cpu_count = previous_cpu_count + 1 if cpu_high else 0
-    memory_count = previous_memory_count + 1 if memory_high else 0
+    def sequence(kind, high):
+        if not high or now is None:
+            return 0, None, 0.0
+        start_text = previous.get(f"high_{kind}_since")
+        start = _metric_timestamp(start_text)
+        try:
+            count = max(0, int(previous.get(f"consecutive_high_{kind}", 0)))
+        except (TypeError, ValueError):
+            count = 0
+        if not count or start is None or last is None or start > last:
+            return 1, observed_at, 0.0
+        return count + int(gap != 0), start_text, (now - start).total_seconds()
+
+    cpu_count, cpu_since, cpu_duration = sequence("cpu", cpu_high)
+    memory_count, memory_since, memory_duration = sequence("memory", memory_high)
     return {
+        "container_id": container_id,
         "metrics_available": valid_sample,
-        "cpu_percent": cpu_percent,
-        "memory_percent": memory_percent,
+        "cpu_percent": cpu_percent if cpu_valid else None,
+        "memory_percent": memory_percent if memory_valid else None,
         "high_cpu": cpu_high,
         "high_memory": memory_high,
         "consecutive_high_cpu": cpu_count,
         "consecutive_high_memory": memory_count,
+        "high_cpu_since": cpu_since,
+        "high_memory_since": memory_since,
+        "high_cpu_duration_seconds": cpu_duration,
+        "high_memory_duration_seconds": memory_duration,
+        "min_duration_seconds": settings["min_duration_seconds"],
+        "max_sample_gap_seconds": settings["max_sample_gap_seconds"],
+        "sustained_high_cpu": cpu_count >= settings["required_samples"] and cpu_duration >= settings["min_duration_seconds"],
+        "sustained_high_memory": memory_count >= settings["required_samples"] and memory_duration >= settings["min_duration_seconds"],
         "required_samples": settings["required_samples"],
         "cpu_threshold_percent": settings["cpu_threshold_percent"],
         "memory_threshold_percent": settings["memory_threshold_percent"],
@@ -147,7 +188,7 @@ def _evaluate_sustained_metrics(metric_entry: dict[str, Any]) -> dict[str, Any]:
         metric_entry.get("high_memory_threshold_percent", 95.0)
     )
 
-    if cpu_count >= required_samples:
+    if cpu_count >= required_samples and metric_entry.get("sustained_high_cpu"):
         findings.append(
             {
                 "severity": "low",
@@ -157,11 +198,11 @@ def _evaluate_sustained_metrics(metric_entry: dict[str, Any]) -> dict[str, Any]:
                 "in the current sample and "
                 f"{cpu_count} observations "
                 "consecutive above the "
-                "threshold.",
+                f"threshold over {metric_entry['high_cpu_duration_seconds']:g} seconds.",
             }
         )
 
-    if memory_count >= required_samples:
+    if memory_count >= required_samples and metric_entry.get("sustained_high_memory"):
         memory_severity = (
             "high" if (memory_percent >= memory_high_threshold) else "medium"
         )
@@ -174,7 +215,7 @@ def _evaluate_sustained_metrics(metric_entry: dict[str, Any]) -> dict[str, Any]:
                 "in the current sample and "
                 f"{memory_count} observations "
                 "consecutive above the "
-                "threshold.",
+                f"threshold over {metric_entry['high_memory_duration_seconds']:g} seconds.",
             }
         )
 
@@ -194,6 +235,8 @@ def _container_baseline_entry(snapshot: dict[str, Any]) -> dict[str, Any]:
         restarts = 0
 
     return {
+        "container_id": snapshot.get("container_id"),
+        "expected": bool(snapshot.get("expected", False)),
         "state": str(snapshot.get("state", "unknown")),
         "running": bool(snapshot.get("running", False)),
         "health": str(snapshot.get("health", "no_healthcheck")),
@@ -217,7 +260,7 @@ def _compare_container_with_baseline(
         "health_changed": False,
     }
 
-    if not baseline_exists:
+    if not baseline_exists or snapshot.get("inspection_available") is False:
         return result
 
     if not isinstance(previous, dict):
@@ -231,6 +274,11 @@ def _compare_container_with_baseline(
         return result
 
     current_entry = _container_baseline_entry(snapshot)
+    if (previous.get("container_id") and current_entry.get("container_id")
+            and previous["container_id"] != current_entry["container_id"]):
+        result["changes"].append({"type": "recreated_service", "origin": name,
+                                  "description": "Container identity changed; a new instance is being observed."})
+        return result
     previous_state = str(previous.get("state", "unknown"))
     current_state = str(current_entry["state"])
     previous_running = bool(previous.get("running", (previous_state == "running")))

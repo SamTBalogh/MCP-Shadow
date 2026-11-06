@@ -657,6 +657,10 @@ class OllamaAnalyzer:
     Rules:
 
     - Use only the supplied data.
+    - When metrics_available is false, statistics are unavailable or partial.
+      Check metric_status for each measurement and its collection time.
+      Null metrics are unavailable, not zero consumption or evidence of health.
+      Mention this limitation and use the available state and logs.
     - Do not invent causes.
     - Distinguish facts from hypotheses.
     - Each evidence field must quote a short excerpt from the observed
